@@ -40,7 +40,7 @@ CLI group and the Display menu submenu work immediately. No manual step needed.
 ### Manual
 
 ```bash
-git clone git@github.com:nightdevil00/better.displays.git \
+git clone https://github.com/nightdevil00/better.displays.git \
   ~/.config/omarchy/plugins/better.displays
 cd ~/.config/omarchy/plugins/better.displays
 ./install                 # symlink the backend scripts into ~/.local/bin
