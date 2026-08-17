@@ -29,7 +29,7 @@ terminal control** in a bar widget you open directly from the status bar.
 ### Via `omarchy plugin add` (recommended)
 
 ```bash
-omarchy plugin add git@github.com:nightdevil00/better.displays.git --enable
+omarchy plugin add https://github.com/nightdevil00/better.displays.git --enable
 ```
 
 This clones the plugin, validates it, and enables the bar widget. When the
