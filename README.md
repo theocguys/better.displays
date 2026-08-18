@@ -98,6 +98,28 @@ better.displays/
 widget works the moment the folder is present — the `install` step only exists
 to expose the `omarchy display` CLI / menu.
 
+## Security
+
+The plugin receives monitor names, mode strings, positions, and scale values
+from Hyprland (`hyprctl monitors -j`) and passes them through several layers:
+
+**Panel.qml** — constructs `bash -c` commands to call the backend scripts. All
+interpolated values (monitor name, flags, terminal names, sizes) are wrapped
+with `shellEscape()` which quotes each argument with single quotes and escapes
+any embedded single quotes, preventing shell metacharacter injection.
+
+**omarchy-display-monitor** —
+
+| Concern | Mitigation |
+| --- | --- |
+| Monitor name in jq filter | `jq --arg` used instead of string interpolation, so names cannot break out of the filter expression |
+| Values embedded in Lua expressions (`hyprctl eval`, `monitors.lua`) | All inputs validated against strict regex patterns **before** use: output names match `[a-zA-Z0-9_-]+(:[a-zA-Z0-9_-]+)?`, modes match `WxH@R[Hz]`, positions match `XxY` or `auto`, scales are numeric, transforms are `0`–`3`. String values are also run through `lua_escape()` which escapes `\` and `"` for safe Lua double-quote embedding |
+| Values used in grep/awk patterns | `persist_to_lua` uses the same `lua_escape()` output in its grep regex and awk `-v` assignments |
+
+**omarchy-display-terminal** — validates that the terminal name is one of the
+known set (`alacritty`, `kitty`, `ghostty`, `foot`) via a whitelist check and
+that the font size is numeric (`^[0-9]+(\.[0-9]+)?$`).
+
 ## License
 
 MIT — do what you like, attribute if you're feeling generous.
