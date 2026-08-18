@@ -24,6 +24,12 @@ Panel {
   readonly property var transformPresets: ["0", "1", "2", "3"]
   readonly property var terminals: ["alacritty", "kitty", "ghostty", "foot"]
 
+  function shellEscape(s) {
+    if (s === undefined || s === null) return "''"
+    var str = String(s)
+    return "'" + str.replace(/'/g, "'\\''") + "'"
+  }
+
   function selectedMonitor() {
     if (!root.monitors || root.monitors.length === 0) return null
     for (var i = 0; i < root.monitors.length; i++)
@@ -73,12 +79,12 @@ Panel {
   function setMonitor(flag, val) {
     var m = root.selectedMonitor()
     if (!m) return
-    actionProc.command = ["bash", "-c", root.scriptDir + "/omarchy-display-monitor set " + m.name + " " + flag + " " + val]
+    actionProc.command = ["bash", "-c", root.scriptDir + "/omarchy-display-monitor set " + root.shellEscape(m.name) + " " + root.shellEscape(flag) + " " + root.shellEscape(val)]
     if (!actionProc.running) actionProc.running = true
   }
 
   function setTerminal(term, size) {
-    actionProc.command = ["bash", "-c", root.scriptDir + "/omarchy-display-terminal set " + term + " " + size]
+    actionProc.command = ["bash", "-c", root.scriptDir + "/omarchy-display-terminal set " + root.shellEscape(term) + " " + root.shellEscape(size)]
     if (!actionProc.running) actionProc.running = true
   }
 
