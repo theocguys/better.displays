@@ -5,6 +5,11 @@ terminal control** in a bar widget you open directly from the status bar.
 
 ![preview](preview.png)
 
+> **This is a fork.** It absorbs everything the built-in `omarchy.monitor`
+> ("Display") widget did, so the two no longer need to sit in the bar together,
+> and adds a keyboard-backlight slider on top. See
+> [Fork additions](#fork-additions).
+
 ## Features
 
 - **Per-monitor** resolution (real modes reported by the monitor), scale,
@@ -18,11 +23,42 @@ terminal control** in a bar widget you open directly from the status bar.
 - A matching `omarchy display ...` CLI group and an interactive Display menu
   submenu (the scripts are installed onto `PATH` automatically).
 
+## Fork additions
+
+Everything below is added by this fork. Each section hides itself when the
+hardware is not present, so a desktop with no backlight simply does not show
+the brightness or keyboard sliders.
+
+- **Brightness** slider, plus scroll-wheel over the bar icon (with the standard
+  Omarchy OSD). Backed by `omarchy-brightness-display`.
+- **Keyboard backlight** slider, backed by a new `bin/omarchy-display-keyboard`
+  script. The stock `omarchy-brightness-keyboard` only steps up/down/cycle,
+  which a slider cannot drive, so this talks to `brightnessctl` directly.
+  Requires `brightnessctl`; writes go through logind, so no elevation.
+- **Displays on/off** per output, using the display list from
+  `omarchy-monitor-state` rather than `hyprctl monitors -j` — the latter omits
+  disabled outputs, so you could switch a monitor off and have no way to switch
+  it back on. The last enabled output is protected.
+- **Text size** slider (shell base font + GTK text scaling) via
+  `omarchy-display-text-size`, with seven notched stops.
+- **Distinct bar icon** (monitor-dashboard) so the widget is not confused with
+  `omarchy.monitor`'s plain monitor glyph.
+
+Three behaviours are carried over deliberately from the built-in widget, whose
+own comments flag them as bugs it already hit: no re-read after a brightness
+write (it races the backlight driver, which can return an empty string that
+parses to `0` and bounces the slider to zero); a queued-write latch so dragging
+a slider does not spawn overlapping processes; and a preview index that holds
+the chosen text size until `Style.font.baseSize` catches up through the file
+watch, so the knob does not snap back mid-flight.
+
 ## Requirements
 
 - Omarchy (Hyprland-based) with the Quickshell shell.
 - `bash` and `jq` (both standard on Omarchy).
 - `hyprctl` (provided by Hyprland).
+- `brightnessctl`, for the keyboard-backlight slider only. Without it that
+  one section stays hidden; everything else works.
 
 ## Install
 

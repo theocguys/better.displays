@@ -15,6 +15,28 @@ Panel {
   property string selected: ""
   property var terminalSizes: ({})
 
+  // --- Ported from omarchy.monitor: brightness, text size, display power ---
+  property int brightnessPercent: 0
+  property int pendingBrightnessPercent: 0
+  property bool brightnessSetQueued: false
+  property bool brightnessAvailable: false
+  property string focusedMonitor: ""
+  property var displayStates: []
+  property int enabledDisplayCount: 0
+  property int kbdBrightnessPercent: 0
+  property int pendingKbdBrightnessPercent: 0
+  property bool kbdBrightnessSetQueued: false
+  property bool kbdBrightnessAvailable: false
+
+  // Carries sub-notch touchpad deltas between wheel events.
+  property real wheelAccumulator: 0
+
+  // Curated stops (px). The CLI accepts any integer in range; the slider snaps.
+  readonly property var textSizeStops: [9, 10, 11, 12, 14, 16, 20]
+  // Holds the chosen stop while the change round-trips through the file Style
+  // watches, so the knob does not snap back mid-flight. -1 = follow Style.
+  property int textSizePreviewIndex: -1
+
   // Absolute path to this plugin's bundled scripts, so the panel works on
   // install without relying on the shell's PATH. (Qt.resolvedUrl(".") is the
   // directory of this Panel.qml.)
@@ -74,6 +96,8 @@ Panel {
   function refresh() {
     if (!monitorProc.running) monitorProc.running = true
     if (!termProc.running) termProc.running = true
+    if (!stateProc.running) stateProc.running = true
+    if (!kbdStateProc.running) kbdStateProc.running = true
   }
 
   function setMonitor(flag, val) {
@@ -95,6 +119,85 @@ Panel {
     if (next < 6) next = 6
     if (next > 40) next = 40
     root.setTerminal(term, next)
+  }
+
+  function clampBrightness(value) {
+    var n = Number(value)
+    if (!isFinite(n)) return 1
+    return Math.max(1, Math.min(100, Math.round(n)))
+  }
+
+  function setBrightness(value) {
+    var percent = root.clampBrightness(value)
+    root.brightnessPercent = percent
+    root.pendingBrightnessPercent = percent
+    if (setBrightnessProc.running) {
+      root.brightnessSetQueued = true
+      return
+    }
+    root.brightnessSetQueued = false
+    setBrightnessProc.command = ["omarchy-brightness-display", "--no-osd", "--monitor", root.focusedMonitor, percent + "%"]
+    setBrightnessProc.running = true
+  }
+
+  function previewBrightness(value) {
+    root.brightnessPercent = root.clampBrightness(value)
+    brightnessDebounce.restart()
+  }
+
+  function showBrightnessOsd(percent) {
+    if (!root.bar || !root.bar.shell) return
+    root.bar.shell.summon("omarchy.osd", JSON.stringify({ icon: "brightness", value: percent }))
+  }
+
+  function setKbdBrightness(value) {
+    var percent = Math.max(0, Math.min(100, Math.round(Number(value))))
+    if (!isFinite(percent)) return
+    root.kbdBrightnessPercent = percent
+    root.pendingKbdBrightnessPercent = percent
+    if (setKbdBrightnessProc.running) {
+      root.kbdBrightnessSetQueued = true
+      return
+    }
+    root.kbdBrightnessSetQueued = false
+    setKbdBrightnessProc.command = ["bash", "-c", root.scriptDir + "/omarchy-display-keyboard set " + root.shellEscape(percent)]
+    setKbdBrightnessProc.running = true
+  }
+
+  function previewKbdBrightness(value) {
+    root.kbdBrightnessPercent = Math.max(0, Math.min(100, Math.round(Number(value))))
+    kbdBrightnessDebounce.restart()
+  }
+
+  function nearestTextStop(px) {
+    var best = 0
+    var bestDiff = 1e9
+    for (var i = 0; i < root.textSizeStops.length; i++) {
+      var diff = Math.abs(root.textSizeStops[i] - px)
+      if (diff < bestDiff) { bestDiff = diff; best = i }
+    }
+    return best
+  }
+
+  function currentTextIndex() {
+    return root.textSizePreviewIndex >= 0 ? root.textSizePreviewIndex : root.nearestTextStop(Style.font.baseSize)
+  }
+
+  function displayedTextPx() {
+    return root.textSizePreviewIndex >= 0 ? root.textSizeStops[root.textSizePreviewIndex] : Style.font.baseSize
+  }
+
+  function setTextSize(px) {
+    textScaleProc.command = ["omarchy-display-text-size", String(px)]
+    if (!textScaleProc.running) textScaleProc.running = true
+  }
+
+  // Refuses to disable the last enabled output, which would black out the session.
+  function toggleDisplay(name, enabled) {
+    if (!name) return
+    if (enabled && root.enabledDisplayCount <= 1) return
+    actionProc.command = ["hyprctl", "keyword", "monitor", name + (enabled ? ",disable" : ",preferred,auto,auto")]
+    if (!actionProc.running) actionProc.running = true
   }
 
   function posFor(selected, other, dir) {
@@ -212,6 +315,104 @@ Panel {
     onRunningChanged: if (!running) root.refresh()
   }
 
+  // omarchy-monitor-state emits one field per line. We use brightness (0),
+  // the focused output (5) and the displays JSON (7) -- unlike
+  // `hyprctl monitors -j`, that JSON also lists outputs currently disabled,
+  // which is what makes re-enabling them possible.
+  Process {
+    id: stateProc
+    command: ["omarchy-monitor-state"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var lines = String(text || "").split("\n")
+        var brightness = String(lines[0] || "").trim()
+        root.brightnessAvailable = brightness !== "unavailable" && brightness !== ""
+        root.brightnessPercent = root.brightnessAvailable ? Math.max(0, Math.min(100, parseInt(brightness, 10))) : 0
+        root.focusedMonitor = String(lines[5] || "").trim()
+        try {
+          var parsed = JSON.parse(String(lines[7] || "[]").trim())
+          var count = 0
+          for (var i = 0; i < parsed.length; i++) if (parsed[i].enabled) count++
+          root.displayStates = parsed
+          root.enabledDisplayCount = count
+        } catch (e) { /* ignore parse errors */ }
+      }
+    }
+  }
+
+  // Unlike the display backlight, there is no omarchy CLI that sets an
+  // absolute keyboard level (omarchy-brightness-keyboard only steps), so this
+  // uses the bundled script.
+  Process {
+    id: kbdStateProc
+    command: ["bash", "-c", root.scriptDir + "/omarchy-display-keyboard get"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var value = String(text || "").trim()
+        root.kbdBrightnessAvailable = value !== "unavailable" && value !== ""
+        if (root.kbdBrightnessAvailable)
+          root.kbdBrightnessPercent = Math.max(0, Math.min(100, parseInt(value, 10)))
+      }
+    }
+  }
+
+  Timer {
+    id: kbdBrightnessDebounce
+    interval: 180
+    repeat: false
+    onTriggered: root.setKbdBrightness(root.kbdBrightnessPercent)
+  }
+
+  // Same reasoning as setBrightnessProc: no refresh on completion, since
+  // re-reading can race the LED driver and snap the knob back.
+  Process {
+    id: setKbdBrightnessProc
+    stdout: StdioCollector { waitForEnd: true }
+    onRunningChanged: {
+      if (running) return
+      if (root.kbdBrightnessSetQueued) root.setKbdBrightness(root.pendingKbdBrightnessPercent)
+    }
+  }
+
+  Timer {
+    id: brightnessDebounce
+    interval: 180
+    repeat: false
+    onTriggered: root.setBrightness(root.brightnessPercent)
+  }
+
+  // Deliberately does NOT refresh on completion: the percent just written is
+  // authoritative, and re-reading races the backlight driver -- it can return
+  // an empty string, which parses to 0 and bounces the slider to zero.
+  Process {
+    id: setBrightnessProc
+    stdout: StdioCollector { waitForEnd: true }
+    onRunningChanged: {
+      if (running) return
+      if (root.brightnessSetQueued) root.setBrightness(root.pendingBrightnessPercent)
+    }
+  }
+
+  // Rewrites the shell override file; Style picks the new base size up through
+  // its own file watch, so there is nothing to refresh here.
+  Process {
+    id: textScaleProc
+    stdout: StdioCollector { waitForEnd: true }
+  }
+
+  // Once Style's base size catches up to the pending choice, drop the preview
+  // so the slider tracks the live value again.
+  Connections {
+    target: Style
+    function onFontBaseSizeChanged() {
+      if (root.textSizePreviewIndex < 0) return
+      if (Style.font.baseSize === root.textSizeStops[root.textSizePreviewIndex])
+        root.textSizePreviewIndex = -1
+    }
+  }
+
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
@@ -219,8 +420,16 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: Quickshell.screens.length > 1 ? "󰍺" : "󰍹"
+    text: "󰢹"
     onPressed: function(b) { root.toggle() }
+    onWheelMoved: function(delta) {
+      if (!root.brightnessAvailable) return
+      var wheel = Util.wheelSteps(root.wheelAccumulator, delta)
+      root.wheelAccumulator = wheel.remainder
+      if (wheel.steps === 0) return
+      root.setBrightness(root.brightnessPercent + wheel.steps * 5)
+      root.showBrightnessOsd(root.brightnessPercent)
+    }
   }
 
   KeyboardPanel {
@@ -250,7 +459,7 @@ Panel {
           implicitHeight: heroIcon.implicitHeight
           Text {
             id: heroIcon
-            text: "󰍹"
+            text: "󰢹"
             color: root.bar.foreground
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.display
@@ -266,6 +475,105 @@ Panel {
             anchors.left: heroIcon.right
             anchors.leftMargin: Style.space(14)
             anchors.verticalCenter: parent.verticalCenter
+          }
+        }
+
+        // ---------- Brightness ----------
+        PanelSeparator { visible: root.brightnessAvailable; foreground: root.bar.foreground }
+        Column {
+          visible: root.brightnessAvailable
+          width: parent.width
+          spacing: Style.space(6)
+
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(brightnessHeader.implicitHeight, brightnessValue.implicitHeight)
+            PanelSectionHeader {
+              id: brightnessHeader
+              text: "BRIGHTNESS"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+              id: brightnessValue
+              textFormat: Text.PlainText
+              text: Math.round(brightnessSlider.dragging ? brightnessSlider.liveValue : root.brightnessPercent) + "%"
+              color: Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+            }
+          }
+
+          PanelSlider {
+            id: brightnessSlider
+            bar: root.bar
+            width: parent.width
+            minimum: 1
+            maximum: 100
+            step: 1
+            integer: true
+            value: root.brightnessPercent
+            onMoved: function(v) { root.previewBrightness(v) }
+            onReleased: function(v) {
+              brightnessDebounce.stop()
+              root.setBrightness(v)
+            }
+          }
+        }
+
+        // ---------- Keyboard backlight ----------
+        Column {
+          visible: root.kbdBrightnessAvailable
+          width: parent.width
+          spacing: Style.space(6)
+
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(kbdHeader.implicitHeight, kbdValue.implicitHeight)
+            PanelSectionHeader {
+              id: kbdHeader
+              text: "KEYBOARD"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+              id: kbdValue
+              textFormat: Text.PlainText
+              text: Math.round(kbdSlider.dragging ? kbdSlider.liveValue : root.kbdBrightnessPercent) + "%"
+              color: Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+            }
+          }
+
+          PanelSlider {
+            id: kbdSlider
+            bar: root.bar
+            width: parent.width
+            // Unlike the display backlight, 0 is valid here -- the keyboard
+            // light off is a normal state, not a black screen.
+            minimum: 0
+            maximum: 100
+            step: 1
+            integer: true
+            value: root.kbdBrightnessPercent
+            onMoved: function(v) { root.previewKbdBrightness(v) }
+            onReleased: function(v) {
+              kbdBrightnessDebounce.stop()
+              root.setKbdBrightness(v)
+            }
           }
         }
 
@@ -376,6 +684,94 @@ Panel {
                 }
                 onClicked: root.setMonitor("--transform", modelData)
               }
+            }
+          }
+        }
+
+        // ---------- Display power ----------
+        PanelSeparator { visible: root.displayStates.length > 1; foreground: root.bar.foreground }
+        Column {
+          visible: root.displayStates.length > 1
+          width: parent.width
+          spacing: Style.space(8)
+          PanelSectionHeader { text: "DISPLAYS"; foreground: root.bar.foreground; fontFamily: root.bar.fontFamily }
+          Repeater {
+            model: root.displayStates
+            Row {
+              required property var modelData
+              width: parent.width
+              spacing: Style.spacing.sm
+              Text {
+                text: modelData.name + (modelData.focused ? " \u00b7 focused" : "")
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.body
+                width: parent.width - powerToggle.width - Style.spacing.sm
+                elide: Text.ElideRight
+                anchors.verticalCenter: parent.verticalCenter
+              }
+              Button {
+                id: powerToggle
+                text: modelData.enabled ? "On" : "Off"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                fontSize: Style.font.caption
+                bordered: true
+                active: modelData.enabled
+                // The last enabled output must stay on.
+                enabled: !modelData.enabled || root.enabledDisplayCount > 1
+                onClicked: root.toggleDisplay(modelData.name, modelData.enabled)
+              }
+            }
+          }
+        }
+
+        // ---------- Text size ----------
+        PanelSeparator { foreground: root.bar.foreground }
+        Column {
+          width: parent.width
+          spacing: Style.space(6)
+
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(textSizeHeader.implicitHeight, textSizeValue.implicitHeight)
+            PanelSectionHeader {
+              id: textSizeHeader
+              text: "TEXT SIZE"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+              id: textSizeValue
+              textFormat: Text.PlainText
+              text: (textSizeSlider.dragging
+                     ? root.textSizeStops[Math.round(textSizeSlider.liveValue)]
+                     : root.displayedTextPx()) + "px"
+              color: Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+            }
+          }
+
+          PanelSlider {
+            id: textSizeSlider
+            bar: root.bar
+            width: parent.width
+            minimum: 0
+            maximum: root.textSizeStops.length - 1
+            step: 1
+            integer: true
+            tickCount: root.textSizeStops.length
+            value: root.currentTextIndex()
+            onReleased: function(v) {
+              root.textSizePreviewIndex = Math.round(v)
+              root.setTextSize(root.textSizeStops[Math.round(v)])
             }
           }
         }
